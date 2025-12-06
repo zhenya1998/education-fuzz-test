@@ -204,7 +204,7 @@ jobs:
           
           # Создание финального отчета
           cat > FINAL-SQL-INJECTION-REPORT.md << EOF
-          # 🚨 SQL INJECTION VULNERABILITY FOUND - OWASP Juice Shop
+          # SQL INJECTION VULNERABILITY FOUND - OWASP Juice Shop
           
           ## Executive Summary
           **CRITICAL VULNERABILITY** обнаружена в эндпоинте \`/rest/user/login\`. 
